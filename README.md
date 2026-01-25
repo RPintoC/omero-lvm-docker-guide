@@ -1,124 +1,200 @@
 # Guía para la instalacion y configuracion de Omero-Server y Omero-Web con Dockers y LVM
 
+## Objetivo
+- Desplegar OMERO Server + OMERO Web en un servidor local, con:
+- Almacenamiento persistente mediante LVM dedicado
+- PostgreSQL aislado (manejado por Docker)
+- Acceso vía red local (LAN)
+- Sin dependencia de:
+  - dominio público
+  - IP fija
+  - acceso a internet externo
+
+## Escenario de red asumido
+- El servidor sólo es accesible dentro de la red local
+- IP asignada por DHCP (IP puede cambiar)
+- Los clientes acceden usando:
+  - IP local actual del servidor
+  - nombre local (editando /etc/hosts del lado del cliente)
+
 ## Requisitos
-- Ubuntu 24.04 recién instalado.
-- LVM ya configurado por el instalador.
-- Acceso como usuario con privilegios sudo (ejecutar sudo su antes de iniciar).
-- Un disco adicional (separado del que contiene el SO) (puede ser una partición generada antes de instalar el SO).
-- Discos adicionales si vas a extender el almacenamiento.
-- Acceso a la Terminal.
----
-## Crear un único espacio LVM para OMERO (omeroStorage)
+- Sistema
+  - Ubuntu 24.04 LTS
+  - Usuario con privilegios sudo
+  - Acceso a terminal
+- Almacenamiento
+  - Un disco separado del sistema operativo (más discos en caso de querer expandir el espacio)
+  - LVM disponible
+- Conocimientos mínimos
+  - Uso de la línea de comandos en Linux
+    - Navegación básica (cd, ls)
+    - Edición de archivos con editores de texto en terminal (por ejemplo, nano o vi)
+
+## Cambiar a modo administrador (Usuario con privilegios sudo)
+Ejecuta el comando sudo su para entrar en modo administrador.
+```bash
+sudo su
+```
+**En caso de no hacer esto deberás agregar _sudo_ al inicio de todos los comandos usados en esta guía.**
+
+## Instalar LVM (en caso de no instalarlo junto al SO)
+```bash
+apt update
+apt install -y lvm2
+```
+
+## Preparación del almacenamiento con LVM
 ### Verificar que se reconozca el disco secundario
-(usualmente “sdb” en caso contrario reemplazar el nombre en las siguientes instrucciones)
 ```bash
 lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
 ```
-
-### Limpiar el disco (opcional)
+o
 ```bash
-sudo wipefs -a /dev/sdb
+lsblk -o NAME #para ver únicamente los nombres
 ```
 
-### Crear una particion LVM
+En esta guía se asume que el nuevo disco es: /dev/sdb.
+
+En caso de que el disco nuevo no sea sdb cambiar el nombre en las siguientes instrucciones.
+
+El nombre del disco se puede averiguar si se ejecuta el comando antes y después de haber conectado el disco secundario y comparar los resultados del comando.
+(Nota: en el escenario donde se instaló LVM en un SO preexistente la línea "_ubuntu - - vg - ubuntu - - lv_" no aparecerá, esto no afecta al proceso descrito en esta guía).
+
+### Limpiar disco (opcional, destructivo, borra todo su contenido actual)
 ```bash
-sudo parted /dev/sdb --script mklabel gpt
-sudo parted /dev/sdb --script mkpart primary 0% 100%
-sudo parted /dev/sdb --script set 1 lvm on
+wipefs -a /dev/sdb
+```
+### Crear partición LVM
+```bash
+parted /dev/sdb --script mklabel gpt
+parted /dev/sdb --script mkpart primary 0% 100%
+parted /dev/sdb --script set 1 lvm on
+```
+### Crear volumen físico (PV)
+```bash
+pvcreate /dev/sdb1
 ```
 
-### Crear el PV (Physical Volume)
+### Crear grupo de volúmenes (VG) “omeroStorage”
 ```bash
-sudo pvcreate /dev/sdb1
+vgcreate omeroStorage /dev/sdb1
 ```
-### Crear el VG (Volume Group) “omeroStorage”
+### Crear volumen lógico (LV)
 ```bash
-sudo vgcreate omeroStorage /dev/sdb1
-```
-
-
-### Crear un LV dentro de omeroStorage
-```bash
-sudo lvcreate -l 100%FREE -n omeroData omeroStorage
+lvcreate -l 100%FREE -n omeroData omeroStorage
 ```
 
-### Formatear el volumen lógico
+### Formatear volumen (LV)
 ```bash
-sudo mkfs.ext4 /dev/omeroStorage/omeroData
+mkfs.ext4 /dev/omeroStorage/omeroData
 ```
+
 ### Crear el punto de montaje
 ```bash
-sudo mkdir -p /omero/data
+mkdir -p /omero/data
 ```
 
 ### Ubica el UUID
 ```bash
 blkid /dev/omeroStorage/omeroData
 ```
-### Abre el archivo fstab
+Al ejecutar el comando se obtendrá una secuencia de alfanumérica que es el Identificador único universal (Universally unique identifier o UUID) (**debes preservar este dato ya que será necesario en el siguiente paso**) 
+
+### Editar el archivo /etc/fstab
+Puedes ejecutar el comando `nano /etc/fstab` para abrirlo y editarlo.
 ```bash
-sudo nano /etc/fstab
+nano /etc/fstab
 ```
-### Agrega la siguiente línea y guarda los cambios
+Copia y reemplaza `<EL_UUID_AQUI>` por el UUID que obtuviste previamente.
 ```bash
-UUID=<EL_UUID_AQUÍ>  /omero/data  ext4  defaults  0  2
+UUID=<EL_UUID_AQUI> /omero/data ext4 defaults 0 2
 ```
-### Montar el disco
+Agrega la línea de texto al archivo `/etc/fstab` y guarda los cambios.
+
+### Montar el disco:
 ```bash
-sudo mount -a
+systemctl daemon-reload
+mount -a
 ```
----
-## Instalar Docker
+
+## Instalación de Docker
+### Crear directorio para contener los archivos necesarios para Omero con Docker
+```bash
+mkdir -p ~/omero
+cd ~/omero
+```
 ### Agregar llaves GPG oficiales de Docker
 ```bash
-sudo apt update
-sudo apt install ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
+apt remove $(dpkg --get-selections docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc | cut -f1)
+apt update
+apt install -y ca-certificates curl
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+chmod a+r /etc/apt/keyrings/docker.asc
 ```
 
-### Agregar fuentes de repositorio apt
+### Agregar fuentes de repositorio apt:
 ```bash
-sudo tee /etc/apt/sources.list.d/docker.sources <<EOF Types: deb URIs: https://download.docker.com/linux/ubuntu Suites: $(. /etc os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") Components: stable Signed-By: /etc/apt/keyrings/docker.asc EOF
-
-sudo apt update
+tee /etc/apt/sources.list.d/docker.sources <<EOF
+Types: deb ➔ URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "$UBUNTU_CODENAME")
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+apt update
 ```
 
-### Instalar paquetes docker
+### Instalar paquetes docker:
 ```bash
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
 ### Verificar la instalación de docker
 ```bash
-sudo systemctl status docker
+systemctl status docker
 ```
----
-## Descargar las imágenes de OMERO
-### Descargar omero-server y omero-web
+
+### Imágenes Docker
 ```bash
+docker pull postgres
 docker pull openmicroscopy/omero-server
 docker pull openmicroscopy/omero-web-standalone
 ```
 
-### Crear archivo `.env` para variables sensibles
-Abrir nano copiar y pegar el siguiente texto, y modificar los valores de la variables a conveniencia:
+## Preparando el entorno para usar Omero-Server y Omero-Web
+### Asegurate de estar en el directorio ~/omero para generar los archivos necesarios para Omero con Docker
 ```bash
-# --- Base de datos —
-OMERO_DB_USER = db_user
-OMERO_DB_PASS = db_password
-OMERO_DB_NAME = omero_database
-# --- Servidor OMERO —
-OMERO_ROOT_PASS = omero_root_pass
-OMERO_DATA_DIR = /OMERO
-# --- Web —
-OMERO_WEB_PORT=80
+cd ~/omero
 ```
 
-### Crear archivo `docker-compose.yml`
+### Crear archivo “.env” para variables sensibles
 ```bash
-Abrir nano copiar y pegar el siguiente texto:
+nano .env
+```
+
+Contenido del archivo .env:
+```bash
+# --- Base de datos ---
+OMERO_DB_USER=omero_db
+OMERO_DB_PASS=CAMBIAR_PASSWORD
+OMERO_DB_NAME=omero
+# --- Servidor OMERO ---
+OMERO_ROOT_PASS=CAMBIAR_ROOT_PASS
+# --- Web ---
+OMERO_WEB_PORT=8080:8080
+```
+Puedes y debes modificar el valor de estas variables a tu gusto.
+
+### Crear docker-compose.yml
+Puedes descargar el archivo de: https://github.com/RPintoC/omero-lvm-docker-guide/blob/main/docker-compose.yml
+
+O puedes crearlo tu mismo:
+```bash
+nano docker-compose.yml
+```
+
+Contenido del archivo docker-compose.yml (la indentación debe recrearse exactamente como se ven en este documento para que funcione, la indentación la generas con la tecla Tab):
+```bash
 services:
   db:
     image: postgres:13
@@ -131,9 +207,14 @@ services:
       POSTGRES_DB: ${OMERO_DB_NAME}
     volumes:
       - omero-db:/var/lib/postgresql/data
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OMERO_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - omero-net
-
   server:
     image: openmicroscopy/omero-server
     container_name: omero-server
@@ -145,16 +226,13 @@ services:
       CONFIG_omero_db_pass: ${OMERO_DB_PASS}
       CONFIG_omero_db_name: ${OMERO_DB_NAME}
       ROOTPASS: ${OMERO_ROOT_PASS}
-    ports:
-      - "4063:4063"
-      - "4064:4064"
     volumes:
       - /omero/data:/OMERO
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - omero-net
-
   web:
     image: openmicroscopy/omero-web-standalone
     container_name: omero-web
@@ -163,80 +241,90 @@ services:
     environment:
       OMEROHOST: omero-server
     ports:
-      - "${OMERO_WEB_PORT}:4080"
+      - "${OMERO_WEB_PORT}"
     depends_on:
       - server
     networks:
       - omero-net
-
 networks:
   omero-net:
-
 volumes:
   omero-db:
 ```
----
-## Levantar los servicios
-### Antes de levantar los servicios hay que asignar los permisos a docker para acceder a omero/Data en omeroStorage
+
+### Permisos de almacenamiento
+Antes de levantar los servicios hay que asignar los permisos a docker para acceder a omero/Data en omeroStorage.
 ```bash
-sudo chown -R 1000:1000 /omero/data
-sudo chmod -R 775 /omero/data
+chown -R 1000:1000 /omero/data
+chmod -R 775 /omero/data
 ```
 
-### Crear volumen para la base de datos
-```bash
-docker volume create --name omero-db
-```
-
-### Levantar servicios de omero (una vez levantados satisfactoriamente, se iniciaran incluso en caso de resetear la máquina)
+### Levantar servicios de Omero
+Una vez levantados satisfactoriamente, se iniciaran incluso en caso de resetear la máquina.
 ```bash
 docker compose up -d
 ```
 
-### Detener servicios de omero (en caso de querer hacer algún cambio)
+### Verificación del levantamiento de los servicios.
 ```bash
-docker compose down
+docker compose ps
 ```
----
+
+### Conectarse desde el mismo dispositivo.
+Abre cualquier navegador y accede a la siguiente URL:
+```bash
+localhost:4080
+```
+
 ## Identificar IP para conectarse desde otro dispositivo
-Asegurate de tener instalado net-tools, para instalarlo ejecuta:
+### Asegurate de tener instalado iproute2 gawk
+Para instalarlo ejecuta:
 ```bash
-sudo apt install net-tools
+sudo apt update
+sudo apt install iproute2 gawk
 ```
 
-### Si la pc esta conectada al WIFI ()
+### Para identificar la IP del dispositivo ejecuta:
 ```bash
-ifconfig wlo1 | grep 'inet ' | awk '{print $2}'
+ip route show default
 ```
 
-### Si la pc esta conectada por Ethernet
+o para obtener la IP específica:
 ```bash
-ifconfig enp4s0 | grep 'inet ' | awk '{print $2}'
+ip route show default | awk '{print $9}'
 ```
 
-### `wlo1` y `wlo1` pueden no existir en todos los sistemas
-En este caso ejecutar:
+Ejemplo de coneccion al servidor mediante IP en navegador (usa la IP de tu dispositivo)
 ```bash
-ifconfig
+http://<IP>:4080
+http://192.168.0.6:4080
 ```
-y buscar `wlan0`, `eth0`, `enp3s0` o similares.
 
-### Ejemplo de coneccion al servidor mediante IP en navegador
-```bash
-<IP>:80
-```
-```bash
-10.90.6.31:80
-```
----
-## Agregar nuevos discos a omeroStorage (extender LVM)
-### Verificar que se reconozca el nuevo disco secundario
-Usualmente “sdc” en caso contrario reemplazar el nombre en las siguientes instrucciones
+## Extiende el espacio de almacenamiento
+### Agregando un nuevo disco
+Conecta un nuevo disco y verificar que se reconozca
 ```bash
 lsblk -o NAME,SIZE,TYPE,MOUNTPOINT
 ```
+o
+```bash
+lsblk -o NAME #para ver únicamente los nombres
+```
 
-### Crea el script “extiende_omero.sh”
+## Asegurate de estar en el directorio ~/omero
+```bash
+cd ~/omero
+```
+
+## Crea el script “extiende_omero.sh”
+Puedes descargar el archivo de: https://github.com/RPintoC/omero-lvm-docker-guide/blob/main/extiende_omero.sh
+
+O puedes crearlo tu mismo:
+```bash
+nano extiende_omero.sh
+```
+
+Contenido del archivo extiende_omero.sh:
 ```bash
 #!/bin/bash
 # extiende_omero.sh
@@ -269,17 +357,19 @@ echo "Redimensionando filesystem (ext4) en $MOUNT_POINT..."
 resize2fs "/dev/$VG/$LV"
 echo "¡Listo! Nuevo disco $DISCO agregado a $VG/$LV y filesystem redimensionado."
 df -h "$MOUNT_POINT"
+redimensionado." df -h "$MOUNT_POINT"
 ```
 
-### Dale permisos de ejecución
+## Dale permisos de ejecución
 ```bash
 chmod +x extiende_omero.sh
 ```
 
-### Ejecuta el script
+## Ejecuta el script
 ```bash
-sudo ./extiende_omero.sh sdc
+./extiende_omero.sh sdc
 ```
+
 ---
 # Instrucciones para la creación de grupos y usuarios en OMERO
 

@@ -10,9 +10,14 @@ services:
       POSTGRES_DB: ${OMERO_DB_NAME}
     volumes:
       - omero-db:/var/lib/postgresql/data
+    shm_size: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OMERO_DB_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     networks:
       - omero-net
-
   server:
     image: openmicroscopy/omero-server
     container_name: omero-server
@@ -24,16 +29,13 @@ services:
       CONFIG_omero_db_pass: ${OMERO_DB_PASS}
       CONFIG_omero_db_name: ${OMERO_DB_NAME}
       ROOTPASS: ${OMERO_ROOT_PASS}
-    ports:
-      - "4063:4063"
-      - "4064:4064"
     volumes:
       - /omero/data:/OMERO
     depends_on:
-      - db
+      db:
+        condition: service_healthy
     networks:
       - omero-net
-
   web:
     image: openmicroscopy/omero-web-standalone
     container_name: omero-web
@@ -42,14 +44,12 @@ services:
     environment:
       OMEROHOST: omero-server
     ports:
-      - "${OMERO_WEB_PORT}:4080"
+      - "${OMERO_WEB_PORT}"
     depends_on:
       - server
     networks:
       - omero-net
-
 networks:
   omero-net:
-
 volumes:
   omero-db:
